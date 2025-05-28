@@ -18,19 +18,19 @@ from pydrive2.drive import GoogleDrive
 CREATORS       = [c.strip() for c in os.getenv("CREATORS", "").split(",") if c.strip()]
 CLIP_LIMIT     = int(os.getenv("CLIP_LIMIT", 12))
 VIEW_THRESHOLD = int(os.getenv("VIEW_THRESHOLD", 800))
-
 YT_CHANNELS    = [u.strip() for u in os.getenv("YT_CHANNELS", "").split(",") if u.strip()]
 
-TARGET_ROOT    = "The Farm"     # top-level folder
-TARGET_INBOUND = "Inbound"      # subfolder
+TARGET_ROOT    = "The Farm"
+TARGET_INBOUND = "Inbound"
+ROOT_FOLDER_ID = os.getenv("ROOT_FOLDER_ID")   # optional override
 
 today_str = datetime.datetime.now(datetime.timezone.utc).strftime("%y-%m-%d")
 
 # ─────────────────────────────
-# 1.  Get Twitch app token
+# 1.  Twitch app token
 # ─────────────────────────────
 print("🔑  Requesting Twitch app token…")
-token_res = requests.post(
+token = requests.post(
     "https://id.twitch.tv/oauth2/token",
     params={
         "client_id": os.environ["TWITCH_CLIENT_ID"],
@@ -38,43 +38,41 @@ token_res = requests.post(
         "grant_type": "client_credentials",
     },
     timeout=15,
-).json()
+).json()["access_token"]
 
-ACCESS_TOKEN = token_res["access_token"]
 HEADERS = {
     "Client-ID": os.environ["TWITCH_CLIENT_ID"],
-    "Authorization": f"Bearer {ACCESS_TOKEN}",
+    "Authorization": f"Bearer {token}",
 }
 
 # ─────────────────────────────
-# 2.  Working directories
+# 2.  Temp working dirs
 # ─────────────────────────────
 WORKDIR = pathlib.Path(tempfile.mkdtemp(prefix="farmbot_"))
 DL_DIR  = WORKDIR / "clips"
 DL_DIR.mkdir(parents=True, exist_ok=True)
 
 # ─────────────────────────────
-# 3.  Helper → ensure Drive folder exists
+# 3.  Drive helper
 # ─────────────────────────────
 def ensure_folder(drive, title, parent_id="root"):
-    query = (
+    q = (
         f"'{parent_id}' in parents and "
         f"mimeType='application/vnd.google-apps.folder' and "
         f"title='{title}' and trashed=false"
     )
-    found = drive.ListFile({"q": query}).GetList()
+    found = drive.ListFile({"q": q}).GetList()
     if found:
         return found[0]["id"]
-
-    folder = drive.CreateFile(
+    f = drive.CreateFile(
         {
             "title": title,
             "mimeType": "application/vnd.google-apps.folder",
             "parents": [{"id": parent_id}],
         }
     )
-    folder.Upload()
-    return folder["id"]
+    f.Upload()
+    return f["id"]
 
 # ─────────────────────────────
 # 4.  Fetch clip metadata
@@ -85,27 +83,25 @@ utc_start = utc_now - datetime.timedelta(days=1)
 start_iso = utc_start.isoformat().replace("+00:00", "Z")
 end_iso   = utc_now.isoformat().replace("+00:00", "Z")
 
-clips_meta = []
+clips = []
 for login in CREATORS:
-    # 4a. resolve user-ID
-    user_res = requests.get(
+    u = requests.get(
         "https://api.twitch.tv/helix/users",
         headers=HEADERS,
         params={"login": login},
         timeout=10,
     ).json()
-    if not user_res["data"]:
+    if not u["data"]:
         print(f"⚠️  No such user: {login}")
         continue
-    user_id = user_res["data"][0]["id"]
-    display = user_res["data"][0]["display_name"]
+    uid      = u["data"][0]["id"]
+    display  = u["data"][0]["display_name"]
 
-    # 4b. get clips
-    clips_res = requests.get(
+    resp = requests.get(
         "https://api.twitch.tv/helix/clips",
         headers=HEADERS,
         params={
-            "broadcaster_id": user_id,
+            "broadcaster_id": uid,
             "first": 20,
             "started_at": start_iso,
             "ended_at": end_iso,
@@ -113,46 +109,43 @@ for login in CREATORS:
         timeout=10,
     ).json()
 
-    for clip in clips_res.get("data", []):
-        if clip["view_count"] >= VIEW_THRESHOLD:
-            clip["broadcaster_display"] = display
-            clips_meta.append(clip)
+    for c in resp.get("data", []):
+        if c["view_count"] >= VIEW_THRESHOLD:
+            c["broadcaster_display"] = display
+            clips.append(c)
 
-clips_meta = sorted(clips_meta, key=lambda c: c["view_count"], reverse=True)[:CLIP_LIMIT]
-print(f"✅  Selected {len(clips_meta)} clips.")
+clips = sorted(clips, key=lambda x: x["view_count"], reverse=True)[:CLIP_LIMIT]
+print(f"✅  Selected {len(clips)} clips.")
 
 # ─────────────────────────────
-# 5. Download clips with yt-dlp
+# 5.  Download clips with yt-dlp
 # ─────────────────────────────
 downloaded = []
-for clip in clips_meta:
-    out_path = DL_DIR / f'{clip["broadcaster_display"]}-{clip["id"]}.mp4'
-    subprocess.run(
-        ["yt-dlp", "--quiet", "-o", str(out_path), clip["url"]],
-        check=True,
-    )
-    downloaded.append(out_path)
+for c in clips:
+    out = DL_DIR / f'{c["broadcaster_display"]}-{c["id"]}.mp4'
+    subprocess.run(["yt-dlp", "--quiet", "-o", str(out), c["url"]], check=True)
+    downloaded.append(out)
 
-# Optional: 60-sec slices from YouTube VODs
+# Optional: YouTube slices
 for vod in YT_CHANNELS:
     try:
-        start = random.randint(60, 600)
-        section = f"*{start}-{start+60}"
-        out_file = DL_DIR / f"YT-{random.randint(100000,999999)}.mp4"
+        s  = random.randint(60, 600)
+        sec = f"*{s}-{s+60}"
+        out = DL_DIR / f"YT-{random.randint(100000,999999)}.mp4"
         subprocess.run(
-            ["yt-dlp", "--quiet", "--download-sections", section, "-o", str(out_file), vod],
+            ["yt-dlp", "--quiet", "--download-sections", sec, "-o", str(out), vod],
             check=True,
         )
-        downloaded.append(out_file)
+        downloaded.append(out)
     except subprocess.CalledProcessError:
         print(f"⚠️  Failed YT slice: {vod}")
 
 # ─────────────────────────────
-# 6.  Decode key & authenticate Drive
+# 6.  Drive auth
 # ─────────────────────────────
-key_bytes = base64.b64decode(os.environ["GDRIVE_KEY_B64"])
-key_path  = WORKDIR / "sa.json"
-key_path.write_bytes(key_bytes)
+key = base64.b64decode(os.environ["GDRIVE_KEY_B64"])
+key_path = WORKDIR / "sa.json"
+key_path.write_bytes(key)
 
 gauth = GoogleAuth()
 gauth.credentials = ServiceAccountCredentials.from_json_keyfile_name(
@@ -160,17 +153,18 @@ gauth.credentials = ServiceAccountCredentials.from_json_keyfile_name(
 )
 drive = GoogleDrive(gauth)
 
-root_id    = ensure_folder(drive, TARGET_ROOT)
-inbound_id = ensure_folder(drive, TARGET_INBOUND, root_id)
-today_id   = ensure_folder(drive, today_str, inbound_id)
+# choose root folder
+root_id = ROOT_FOLDER_ID if ROOT_FOLDER_ID else ensure_folder(drive, TARGET_ROOT)
+inb_id  = ensure_folder(drive, TARGET_INBOUND, root_id)
+day_id  = ensure_folder(drive, today_str, inb_id)
 
 # ─────────────────────────────
-# 7.  Upload files
+# 7.  Upload
 # ─────────────────────────────
 print("⬆️  Uploading to Drive…")
-for fpath in downloaded:
-    file_obj = drive.CreateFile({"title": fpath.name, "parents": [{"id": today_id}]})
-    file_obj.SetContentFile(str(fpath))
-    file_obj.Upload()
+for f in downloaded:
+    fobj = drive.CreateFile({"title": f.name, "parents": [{"id": day_id}]})
+    fobj.SetContentFile(str(f))
+    fobj.Upload()
 
 print(f"🎉  Done – {len(downloaded)} file(s) uploaded.")
