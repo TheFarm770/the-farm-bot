@@ -1,7 +1,7 @@
-twitchAPI==4.1.0
-yt-dlp
-twitch-downloader==1.58
-pydrive2
+twitchAPI==4.1.0       # query Twitch for top clips
+yt-dlp                 # download the clip MP4s and optional YT VOD cuts
+pydrive2               # Google Drive client
+google-auth            # pinned indirectly but list explicitly for clarity
 google-auth-httplib2
 google-auth-oauthlib
-ffmpeg-python
+ffmpeg-python          # handy helpers if you add captioning or crops later
