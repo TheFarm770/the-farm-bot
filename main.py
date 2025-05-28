@@ -1,45 +1,37 @@
 '''
-Farm Bot - Automated Clip Harvesting Pipeline (USB Edition)
+main.py — USB Copy Edition
 
-This script runs as a scheduled job (e.g., via GitHub Actions) to:
-1. Authenticate to Twitch and fetch the top 10 creators by viewer count.
-2. Retrieve the latest 10 clips for each creator.
-3. Download each clip (and optional 60 s YouTube VOD snippets) using yt-dlp.
-4. Save all downloaded MP4s to a mounted USB drive (e.g., pen drive) instead of Google Drive.
+This script:
+1. Authenticates to Twitch and fetches the top 10 streamers by viewer count.
+2. Retrieves the latest 10 clips per streamer.
+3. Downloads clips via yt-dlp.
+4. Saves all MP4s to a connected pen drive under `The Farm/Inbound/YYYY-MM-DD`.
 
-Sections:
-0. Configuration (env-driven)
-1. Twitch App Token
-2. Working Directories
-3. Fetch Top Creators
-4. Fetch Latest Clips
-5. Download Clips
-6. USB Drive Save
+Usage:
+- Ensure your USB is mounted, then set `PEN_DRIVE_PATH` to its mount point (e.g., `/Volumes/The Farm`).
+- From the project folder, run: `python3 main.py`.
 
 '''
 import os
-import json
-import base64
-import random
 import datetime
-import subprocess
 import tempfile
 import pathlib
-import requests
+import subprocess
+import random
 import shutil
+import requests
 
 
 def main():
-    # 0. Configuration (env-driven)
-    # Path where USB drive is mounted (e.g., '/media/usb' or '/mnt/usb')
-    USB_MOUNT_PATH = os.getenv("PEN_DRIVE_PATH", "/mnt/usb")
+    # 0. Configuration
+    USB_MOUNT_PATH = os.getenv("PEN_DRIVE_PATH", "/Volumes/The Farm")
     TARGET_ROOT    = "The Farm"
     TARGET_INBOUND = "Inbound"
     today_str      = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
 
-    # Validate USB mount
+    # Validate pen drive mount
     usb_root = pathlib.Path(USB_MOUNT_PATH)
-    if not usb_root.exists() or not usb_root.is_dir():
+    if not usb_root.is_dir():
         print(f"❌ USB mount path not found: {USB_MOUNT_PATH}")
         return
 
@@ -53,94 +45,78 @@ def main():
             "grant_type": "client_credentials",
         }
     ).json()
-    ACCESS_TOKEN = token_res.get("access_token")
-    if not ACCESS_TOKEN:
-        print(f"❌ Token error: {token_res}")
+    access_token = token_res.get("access_token")
+    if not access_token:
+        print(f"❌ Twitch token error: {token_res}")
         return
-    HEADERS = {
+    headers = {
         "Client-ID": os.getenv("TWITCH_CLIENT_ID"),
-        "Authorization": f"Bearer {ACCESS_TOKEN}"
+        "Authorization": f"Bearer {access_token}"
     }
 
-    # 2. Working Directories (temporary)
-    WORKDIR = pathlib.Path(tempfile.mkdtemp(prefix="farmbot_"))
-    DL_DIR  = WORKDIR / "clips"
-    DL_DIR.mkdir(parents=True, exist_ok=True)
-    print(f"🗂️ Download directory: {DL_DIR}")
+    # 2. Temporary download directory
+    workdir = pathlib.Path(tempfile.mkdtemp(prefix="farmbot_"))
+    dl_dir = workdir / "clips"
+    dl_dir.mkdir(parents=True, exist_ok=True)
+    print(f"🗂️ Downloading clips into: {dl_dir}")
 
-    # 3. Fetch Top 10 Creators
-    print("🔍 Fetching top 10 Twitch creators by viewer count…")
-    streams_res = requests.get(
+    # 3. Fetch top 10 live streamers
+    print("🔍 Fetching top 10 live Twitch streamers…")
+    streams = requests.get(
         "https://api.twitch.tv/helix/streams",
-        headers=HEADERS,
+        headers=headers,
         params={"first": 10}
-    ).json()
-    streams = streams_res.get('data', [])
+    ).json().get('data', [])
     creators = [{'id': s['user_id'], 'display': s['user_name']} for s in streams]
-    print(f"✅ Found {len(creators)} creators: {[c['display'] for c in creators]}")
+    print(f"✅ Streamers: {[c['display'] for c in creators]}")
 
-    # 4. Fetch Latest Clips
+    # 4. Fetch latest 10 clips per streamer
     clips = []
-    for creator in creators:
-        print(f"🔍 Fetching latest 10 clips for {creator['display']}…")
+    for c in creators:
+        print(f"🔍 Fetching clips for {c['display']}…")
         clip_data = requests.get(
             "https://api.twitch.tv/helix/clips",
-            headers=HEADERS,
-            params={"broadcaster_id": creator['id'], "first": 10}
+            headers=headers,
+            params={"broadcaster_id": c['id'], "first": 10}
         ).json().get('data', [])
-        # Sort by created_at to ensure latest
-        clip_data = sorted(clip_data, key=lambda x: x['created_at'], reverse=True)[:10]
-        print(f"   Retrieved {len(clip_data)} clips")
-        for clip in clip_data:
-            clip['broadcaster_display'] = creator['display']
-            clips.append(clip)
-    print(f"✅ Total clips to download: {len(clips)}")
+        sorted_clips = sorted(clip_data, key=lambda x: x['created_at'], reverse=True)[:10]
+        clips.extend(({
+            'url': clip['url'],
+            'display': c['display'],
+            'id': clip['id']
+        } for clip in sorted_clips))
+        print(f"   → {len(sorted_clips)} clips queued")
 
     if not clips:
         print("❌ No clips found. Exiting.")
         return
+    print(f"✅ Total clips: {len(clips)}")
 
-    # 5. Download Clips
+    # 5. Download all clips
     downloaded = []
     for clip in clips:
-        out = DL_DIR / f"{clip['broadcaster_display']}-{clip['id']}.mp4"
+        out_path = dl_dir / f"{clip['display']}-{clip['id']}.mp4"
         try:
-            subprocess.run(['yt-dlp', '--quiet', '-o', str(out), clip['url']], check=True)
-            downloaded.append(out)
+            subprocess.run(['yt-dlp', '--quiet', '-o', str(out_path), clip['url']], check=True)
+            downloaded.append(out_path)
         except subprocess.CalledProcessError as e:
-            print(f"⚠️ Download failed for {clip['id']}: {e}")
-    # Optional YouTube VOD slices
-    yt_channels = [u.strip() for u in os.getenv("YT_CHANNELS", "").split(",") if u]
-    for vod in yt_channels:
-        try:
-            start = random.randint(60, 600)
-            sec   = f"*{start}-{start+60}"
-            out   = DL_DIR / f"YT-{random.randint(100000,999999)}.mp4"
-            subprocess.run(['yt-dlp', '--quiet', '--download-sections', sec, '-o', str(out), vod], check=True)
-            downloaded.append(out)
-        except Exception as e:
-            print(f"⚠️ YouTube slice failed for {vod}: {e}")
+            print(f"⚠️ Failed: {clip['url']} → {e}")
 
-    # 6. Save to USB Drive
+    # 6. Copy to pen drive
     target_folder = usb_root / TARGET_ROOT / TARGET_INBOUND / today_str
     target_folder.mkdir(parents=True, exist_ok=True)
-    print(f"📁 Copying {len(downloaded)} files to {target_folder}")
-
-    for file_path in downloaded:
+    print(f"📁 Saving to USB: {target_folder}")
+    for f in downloaded:
         try:
-            dest = target_folder / file_path.name
-            shutil.copy2(file_path, dest)
-            print(f"✔️ Copied: {file_path.name}")
+            dest = target_folder / f.name
+            shutil.copy2(f, dest)
+            print(f"   ✔️ {f.name}")
         except Exception as e:
-            print(f"⚠️ Failed to copy {file_path.name}: {e}")
+            print(f"   ⚠️ Copy failed: {f.name} → {e}")
 
-    print("🎉 All clips saved to USB drive. Clean up local temp files.")
-
-    # Cleanup temporary folder
-    try:
-        shutil.rmtree(WORKDIR)
-    except Exception:
-        pass
+    # 7. Cleanup
+    shutil.rmtree(workdir)
+    print("🎉 Done. Clips are on your pen drive.")
 
 if __name__ == '__main__':
     main()
