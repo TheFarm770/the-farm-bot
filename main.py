@@ -1,39 +1,40 @@
 '''
-main.py — USB Copy Edition
+main.py — Local Downloads Edition
 
 This script:
 1. Authenticates to Twitch and fetches the top 10 streamers by viewer count.
 2. Retrieves the latest 10 clips per streamer.
-3. Downloads clips via yt-dlp.
-4. Saves all MP4s to a connected pen drive under `The Farm/Inbound/YYYY-MM-DD`.
+3. Downloads each clip (and optional 60 s YouTube VOD snippets) directly into your local Downloads folder under:
+   `~/Downloads/The Farm/Inbound/YYYY-MM-DD`.
 
 Usage:
-- Ensure your USB is mounted, then set `PEN_DRIVE_PATH` to its mount point (e.g., `/Volumes/The Farm`).
-- From the project folder, run: `python3 main.py`.
+- Ensure `TWITCH_CLIENT_ID` and `TWITCH_CLIENT_SECRET` are exported in your shell.
+- Run:
+  ```bash
+  python3 main.py
+  ```
 
 '''
 import os
 import datetime
-import tempfile
 import pathlib
 import subprocess
 import random
-import shutil
 import requests
 
 
 def main():
     # 0. Configuration
-    USB_MOUNT_PATH = os.getenv("PEN_DRIVE_PATH", "/Volumes/The Farm")
+    HOME = pathlib.Path.home()
+    DOWNLOADS_ROOT = HOME / "Downloads"
     TARGET_ROOT    = "The Farm"
     TARGET_INBOUND = "Inbound"
     today_str      = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
 
-    # Validate pen drive mount
-    usb_root = pathlib.Path(USB_MOUNT_PATH)
-    if not usb_root.is_dir():
-        print(f"❌ USB mount path not found: {USB_MOUNT_PATH}")
-        return
+    # Prepare local download directory
+    download_dir = DOWNLOADS_ROOT / TARGET_ROOT / TARGET_INBOUND / today_str
+    download_dir.mkdir(parents=True, exist_ok=True)
+    print(f"📁 Downloading clips into: {download_dir}")
 
     # 1. Twitch App Token
     print("🔑 Requesting Twitch app token…")
@@ -54,13 +55,7 @@ def main():
         "Authorization": f"Bearer {access_token}"
     }
 
-    # 2. Temporary download directory
-    workdir = pathlib.Path(tempfile.mkdtemp(prefix="farmbot_"))
-    dl_dir = workdir / "clips"
-    dl_dir.mkdir(parents=True, exist_ok=True)
-    print(f"🗂️ Downloading clips into: {dl_dir}")
-
-    # 3. Fetch top 10 live streamers
+    # 2. Fetch top 10 live streamers
     print("🔍 Fetching top 10 live Twitch streamers…")
     streams = requests.get(
         "https://api.twitch.tv/helix/streams",
@@ -70,7 +65,7 @@ def main():
     creators = [{'id': s['user_id'], 'display': s['user_name']} for s in streams]
     print(f"✅ Streamers: {[c['display'] for c in creators]}")
 
-    # 4. Fetch latest 10 clips per streamer
+    # 3. Fetch latest 10 clips per streamer
     clips = []
     for c in creators:
         print(f"🔍 Fetching clips for {c['display']}…")
@@ -92,31 +87,29 @@ def main():
         return
     print(f"✅ Total clips: {len(clips)}")
 
-    # 5. Download all clips
-    downloaded = []
+    # 4. Download all clips
     for clip in clips:
-        out_path = dl_dir / f"{clip['display']}-{clip['id']}.mp4"
+        out_path = download_dir / f"{clip['display']}-{clip['id']}.mp4"
         try:
             subprocess.run(['yt-dlp', '--quiet', '-o', str(out_path), clip['url']], check=True)
-            downloaded.append(out_path)
+            print(f"   ✔️ Downloaded: {out_path.name}")
         except subprocess.CalledProcessError as e:
-            print(f"⚠️ Failed: {clip['url']} → {e}")
+            print(f"   ⚠️ Failed: {clip['url']} → {e}")
 
-    # 6. Copy to pen drive
-    target_folder = usb_root / TARGET_ROOT / TARGET_INBOUND / today_str
-    target_folder.mkdir(parents=True, exist_ok=True)
-    print(f"📁 Saving to USB: {target_folder}")
-    for f in downloaded:
+    # Optional: Download YouTube VOD snippets
+    yt_channels = [u.strip() for u in os.getenv("YT_CHANNELS", "").split(",") if u]
+    for vod in yt_channels:
+        start = random.randint(60, 600)
+        sec   = f"*{start}-{start+60}"
+        out_path = download_dir / f"YT-{random.randint(100000,999999)}.mp4"
         try:
-            dest = target_folder / f.name
-            shutil.copy2(f, dest)
-            print(f"   ✔️ {f.name}")
-        except Exception as e:
-            print(f"   ⚠️ Copy failed: {f.name} → {e}")
+            subprocess.run(['yt-dlp', '--quiet', '--download-sections', sec, '-o', str(out_path), vod], check=True)
+            print(f"   ✔️ YouTube slice: {out_path.name}")
+        except subprocess.CalledProcessError as e:
+            print(f"   ⚠️ YouTube slice failed for {vod} → {e}")
 
-    # 7. Cleanup
-    shutil.rmtree(workdir)
-    print("🎉 Done. Clips are on your pen drive.")
+    print("🎉 All done. Videos are in your Downloads folder.")
 
 if __name__ == '__main__':
     main()
+
