@@ -2,7 +2,7 @@
 Farm Bot - Automated Clip Harvesting Pipeline
 
 This script runs as a scheduled job (e.g., via GitHub Actions) to:
-1. Authenticate to Twitch and fetch the top 10 creators by current viewer count.
+1. Authenticate to Twitch and fetch the top 10 creators by viewer count.
 2. Retrieve the latest 10 clips for each of those creators.
 3. Download each clip (and optional 60 s YouTube VOD snippets) using yt-dlp.
 4. Authenticate to Google Drive via a Service Account.
@@ -39,7 +39,9 @@ def main():
     YT_CHANNELS    = [u.strip() for u in os.getenv("YT_CHANNELS", "").split(",") if u]
     TARGET_ROOT    = "The Farm"
     TARGET_INBOUND = "Inbound"
-    ROOT_FOLDER_ID = os.getenv("ROOT_FOLDER_ID")  # Must be shared with the service account
+    ROOT_FOLDER_ID = os.getenv("ROOT_FOLDER_ID") or "root"  # Fallback to root if unset
+    if os.getenv("ROOT_FOLDER_ID") is None:
+        print("⚠️ ROOT_FOLDER_ID not set; defaulting to 'root'")
     today_str      = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
 
     # 1. Twitch App Token
@@ -69,17 +71,22 @@ def main():
 
     # 3. Drive-Folder Helper
     def ensure_folder(drive, title, parent_id="root"):
+        parent = parent_id or "root"
         query = (
-            f"'{parent_id}' in parents and mimeType='application/vnd.google-apps.folder' "
+            f"'{parent}' in parents and mimeType='application/vnd.google-apps.folder' "
             f"and name='{title}' and trashed=false"
         )
-        items = drive.ListFile({'q': query}).GetList()
+        try:
+            items = drive.ListFile({'q': query}).GetList()
+        except Exception as e:
+            print(f"❌ Drive query failed: {e}\nQuery: {query}")
+            raise
         if items:
             return items[0]['id']
         folder = drive.CreateFile({
             'name': title,
             'mimeType': 'application/vnd.google-apps.folder',
-            'parents': [{'id': parent_id}]
+            'parents': [{'id': parent}]
         })
         folder.Upload()
         return folder['id']
