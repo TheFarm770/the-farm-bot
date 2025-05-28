@@ -1,7 +1,7 @@
-twitchAPI==4.1.0
-yt-dlp
-pydrive2
-google-auth
+requests               # simple HTTP for Twitch & token calls
+yt-dlp                 # downloads MP4s (Twitch clips + optional YT VOD cuts)
+pydrive2               # Google Drive client
+google-auth            # explicit in case pydrive2 pins a different minor
 google-auth-httplib2
 google-auth-oauthlib
-ffmpeg-python
+ffmpeg-python          # keep if you’ll add captioning / crops later
