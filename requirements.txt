@@ -1,0 +1,7 @@
+twitchAPI==4.1.0
+yt-dlp
+twitch-downloader==1.58
+pydrive2
+google-auth-httplib2
+google-auth-oauthlib
+ffmpeg-python
