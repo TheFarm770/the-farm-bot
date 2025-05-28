@@ -1,25 +1,22 @@
 '''
-Farm Bot - Automated Clip Harvesting Pipeline
+Farm Bot - Automated Clip Harvesting Pipeline (USB Edition)
 
 This script runs as a scheduled job (e.g., via GitHub Actions) to:
 1. Authenticate to Twitch and fetch the top 10 creators by viewer count.
-2. Retrieve the latest 10 clips for each of those creators.
+2. Retrieve the latest 10 clips for each creator.
 3. Download each clip (and optional 60 s YouTube VOD snippets) using yt-dlp.
-4. Authenticate to Google Drive via a Service Account.
-5. Ensure a folder hierarchy in Drive: ROOT_FOLDER_ID → The Farm → Inbound → YYYY-MM-DD.
-6. Upload all downloaded MP4s to the dated folder.
+4. Save all downloaded MP4s to a mounted USB drive (e.g., pen drive) instead of Google Drive.
 
 Sections:
 0. Configuration (env-driven)
 1. Twitch App Token
 2. Working Directories
-3. Drive-Folder Helper
-4. Fetch Top Creators
-5. Fetch Latest Clips
-6. Download Clips
-7. Drive Authentication & Upload
+3. Fetch Top Creators
+4. Fetch Latest Clips
+5. Download Clips
+6. USB Drive Save
 
-'''  
+'''
 import os
 import json
 import base64
@@ -29,20 +26,22 @@ import subprocess
 import tempfile
 import pathlib
 import requests
-
-from pydrive2.auth import GoogleAuth, ServiceAccountCredentials
-from pydrive2.drive import GoogleDrive
+import shutil
 
 
 def main():
     # 0. Configuration (env-driven)
-    YT_CHANNELS    = [u.strip() for u in os.getenv("YT_CHANNELS", "").split(",") if u]
+    # Path where USB drive is mounted (e.g., '/media/usb' or '/mnt/usb')
+    USB_MOUNT_PATH = os.getenv("PEN_DRIVE_PATH", "/mnt/usb")
     TARGET_ROOT    = "The Farm"
     TARGET_INBOUND = "Inbound"
-    ROOT_FOLDER_ID = os.getenv("ROOT_FOLDER_ID") or "root"  # Fallback to 'root' if unset
-    if os.getenv("ROOT_FOLDER_ID") is None:
-        print("⚠️ ROOT_FOLDER_ID not set; defaulting to 'root'")
     today_str      = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+
+    # Validate USB mount
+    usb_root = pathlib.Path(USB_MOUNT_PATH)
+    if not usb_root.exists() or not usb_root.is_dir():
+        print(f"❌ USB mount path not found: {USB_MOUNT_PATH}")
+        return
 
     # 1. Twitch App Token
     print("🔑 Requesting Twitch app token…")
@@ -63,35 +62,13 @@ def main():
         "Authorization": f"Bearer {ACCESS_TOKEN}"
     }
 
-    # 2. Working Directories
+    # 2. Working Directories (temporary)
     WORKDIR = pathlib.Path(tempfile.mkdtemp(prefix="farmbot_"))
     DL_DIR  = WORKDIR / "clips"
     DL_DIR.mkdir(parents=True, exist_ok=True)
     print(f"🗂️ Download directory: {DL_DIR}")
 
-    # 3. Drive-Folder Helper
-    def ensure_folder(drive, title, parent_id="root"):
-        parent = parent_id or "root"
-        query = (
-            f"'{parent}' in parents and mimeType='application/vnd.google-apps.folder' "
-            f"and title='{title}' and trashed=false"
-        )
-        try:
-            items = drive.ListFile({'q': query}).GetList()
-        except Exception as e:
-            print(f"❌ Drive query failed: {e}\nQuery: {query}")
-            raise
-        if items:
-            return items[0]['id']
-        folder = drive.CreateFile({
-            'title': title,
-            'mimeType': 'application/vnd.google-apps.folder',
-            'parents': [{'id': parent}]
-        })
-        folder.Upload()
-        return folder['id']
-
-    # 4. Fetch Top Creators
+    # 3. Fetch Top 10 Creators
     print("🔍 Fetching top 10 Twitch creators by viewer count…")
     streams_res = requests.get(
         "https://api.twitch.tv/helix/streams",
@@ -102,18 +79,16 @@ def main():
     creators = [{'id': s['user_id'], 'display': s['user_name']} for s in streams]
     print(f"✅ Found {len(creators)} creators: {[c['display'] for c in creators]}")
 
-    # 5. Fetch Latest Clips
+    # 4. Fetch Latest Clips
     clips = []
     for creator in creators:
         print(f"🔍 Fetching latest 10 clips for {creator['display']}…")
         clip_data = requests.get(
             "https://api.twitch.tv/helix/clips",
             headers=HEADERS,
-            params={
-                "broadcaster_id": creator['id'],
-                "first": 10
-            }
+            params={"broadcaster_id": creator['id'], "first": 10}
         ).json().get('data', [])
+        # Sort by created_at to ensure latest
         clip_data = sorted(clip_data, key=lambda x: x['created_at'], reverse=True)[:10]
         print(f"   Retrieved {len(clip_data)} clips")
         for clip in clip_data:
@@ -125,7 +100,7 @@ def main():
         print("❌ No clips found. Exiting.")
         return
 
-    # 6. Download Clips
+    # 5. Download Clips
     downloaded = []
     for clip in clips:
         out = DL_DIR / f"{clip['broadcaster_display']}-{clip['id']}.mp4"
@@ -134,43 +109,38 @@ def main():
             downloaded.append(out)
         except subprocess.CalledProcessError as e:
             print(f"⚠️ Download failed for {clip['id']}: {e}")
-    for vod in YT_CHANNELS:
+    # Optional YouTube VOD slices
+    yt_channels = [u.strip() for u in os.getenv("YT_CHANNELS", "").split(",") if u]
+    for vod in yt_channels:
         try:
             start = random.randint(60, 600)
-            sec = f"*{start}-{start+60}"
-            out = DL_DIR / f"YT-{random.randint(100000,999999)}.mp4"
+            sec   = f"*{start}-{start+60}"
+            out   = DL_DIR / f"YT-{random.randint(100000,999999)}.mp4"
             subprocess.run(['yt-dlp', '--quiet', '--download-sections', sec, '-o', str(out), vod], check=True)
             downloaded.append(out)
         except Exception as e:
             print(f"⚠️ YouTube slice failed for {vod}: {e}")
 
-    # 7. Drive Authentication & Upload
-    print("🔑 Authenticating to Google Drive…")
+    # 6. Save to USB Drive
+    target_folder = usb_root / TARGET_ROOT / TARGET_INBOUND / today_str
+    target_folder.mkdir(parents=True, exist_ok=True)
+    print(f"📁 Copying {len(downloaded)} files to {target_folder}")
+
+    for file_path in downloaded:
+        try:
+            dest = target_folder / file_path.name
+            shutil.copy2(file_path, dest)
+            print(f"✔️ Copied: {file_path.name}")
+        except Exception as e:
+            print(f"⚠️ Failed to copy {file_path.name}: {e}")
+
+    print("🎉 All clips saved to USB drive. Clean up local temp files.")
+
+    # Cleanup temporary folder
     try:
-        key_dict = json.loads(base64.b64decode(os.getenv('GDRIVE_KEY_B64')))
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(
-            key_dict,
-            scopes=['https://www.googleapis.com/auth/drive']
-        )
-    except Exception as e:
-        print(f"❌ GDrive auth failed: {e}")
-        return
-    gauth = GoogleAuth()
-    gauth.credentials = creds
-    drive = GoogleDrive(gauth)
-
-    farm_id    = ensure_folder(drive, TARGET_ROOT, parent_id=ROOT_FOLDER_ID)
-    inbound_id = ensure_folder(drive, TARGET_INBOUND, parent_id=farm_id)
-    date_id    = ensure_folder(drive, today_str, parent_id=inbound_id)
-
-    print(f"📤 Uploading {len(downloaded)} files to folder ID {date_id}")
-    for path in downloaded:
-        f = drive.CreateFile({'title': path.name, 'parents': [{'id': date_id}]})
-        f.SetContentFile(str(path))
-        f.Upload()
-        print(f"   Uploaded: {path.name}")
-
-    print("🎉 Done.")
+        shutil.rmtree(WORKDIR)
+    except Exception:
+        pass
 
 if __name__ == '__main__':
     main()
