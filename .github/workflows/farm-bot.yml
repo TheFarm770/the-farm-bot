@@ -1,0 +1,27 @@
+name: farm-bot
+on:
+  schedule:
+    - cron:  '0 */2 * * *'   # every 2 hours
+  workflow_dispatch:        # manual run button
+jobs:
+  harvest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: 3.12
+      - name: Install system deps
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Install Python deps
+        run: pip install -r requirements.txt
+      - name: Run harvester
+        env:
+          TWITCH_CLIENT_ID: ${{ secrets.TWITCH_CLIENT_ID }}
+          TWITCH_CLIENT_SECRET: ${{ secrets.TWITCH_CLIENT_SECRET }}
+          GDRIVE_KEY_B64: ${{ secrets.GDRIVE_KEY_B64 }}
+          CREATORS: ${{ secrets.CREATORS }}
+          YT_CHANNELS: ${{ secrets.YT_CHANNELS }}
+        run: python main.py
