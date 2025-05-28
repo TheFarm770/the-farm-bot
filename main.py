@@ -39,7 +39,7 @@ def main():
     YT_CHANNELS    = [u.strip() for u in os.getenv("YT_CHANNELS", "").split(",") if u]
     TARGET_ROOT    = "The Farm"
     TARGET_INBOUND = "Inbound"
-    ROOT_FOLDER_ID = os.getenv("ROOT_FOLDER_ID") or "root"  # Fallback to root if unset
+    ROOT_FOLDER_ID = os.getenv("ROOT_FOLDER_ID") or "root"  # Fallback to 'root' if unset
     if os.getenv("ROOT_FOLDER_ID") is None:
         print("⚠️ ROOT_FOLDER_ID not set; defaulting to 'root'")
     today_str      = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
@@ -74,7 +74,7 @@ def main():
         parent = parent_id or "root"
         query = (
             f"'{parent}' in parents and mimeType='application/vnd.google-apps.folder' "
-            f"and name='{title}' and trashed=false"
+            f"and title='{title}' and trashed=false"
         )
         try:
             items = drive.ListFile({'q': query}).GetList()
@@ -84,7 +84,7 @@ def main():
         if items:
             return items[0]['id']
         folder = drive.CreateFile({
-            'name': title,
+            'title': title,
             'mimeType': 'application/vnd.google-apps.folder',
             'parents': [{'id': parent}]
         })
@@ -165,7 +165,7 @@ def main():
 
     print(f"📤 Uploading {len(downloaded)} files to folder ID {date_id}")
     for path in downloaded:
-        f = drive.CreateFile({'name': path.name, 'parents': [{'id': date_id}]})
+        f = drive.CreateFile({'title': path.name, 'parents': [{'id': date_id}]})
         f.SetContentFile(str(path))
         f.Upload()
         print(f"   Uploaded: {path.name}")
